@@ -65,20 +65,33 @@ Both ACES variants **replace** (not supplement) the ACES Output Transform.
 
 ### Photoshop (ProPhoto RGB)
 
-1. **Develop RAW in Camera Raw** with your preferred Adobe color profile
-2. **Open in Photoshop** with Color Space set to **ProPhoto RGB** (gamma 1.8).
-   This is the standard `ProPhoto RGB` profile that ships with Photoshop --
-   no custom profiles needed
-3. **Apply the LUT** via a Color Lookup adjustment layer:
+1. **Develop RAW in Camera Raw** with your preferred Adobe color profile.
+   In Camera Raw's output settings (Workflow Options), set Color Space to
+   **ProPhoto RGB** (gamma 1.8). This ensures the document pixels are in the
+   correct encoding for the LUT. Your Photoshop working space and display
+   profile do not matter -- Photoshop uses the document's embedded profile
+   for color management, and the LUT operates on the pixel values directly
+2. **Apply the LUT** via a Color Lookup adjustment layer:
    Layer > New Adjustment Layer > Color Lookup. In the Properties panel,
    click the "3D LUT File" dropdown and select "Load 3D LUT..." to browse
    for a `ProPhoto_to_*.cube` file
-4. **Export to sRGB** via Edit > Convert to Profile, or
-   File > Export > Save for Web (Legacy)
+3. **Export to sRGB**: use any of these methods:
+   - **File > Export > Export As**: check "Convert to sRGB"
+   - **File > Export > Save for Web (Legacy)**: check "Convert to sRGB"
+   - **Edit > Convert to Profile**: convert to sRGB, then save normally
+     (this changes the document -- undo or close without saving to keep
+     working in ProPhoto RGB)
 
 The LUT input and output are both gamma 1.8 ProPhoto RGB. What you see on screen
 in Photoshop (through ICC color management) is the intended film simulation appearance.
 You can add adjustment layers above or below the LUT for fine-tuning.
+
+**Note on contrast:** The ProPhoto LUTs will produce different contrast than
+Adobe Camera Raw's built-in camera-matching profiles (e.g., "Camera PROVIA/Standard").
+This is because ACR applies its own tone curve during RAW development, and the
+Fujifilm LUT applies another on top — the LUT was designed for flat F-Log2C footage,
+not already-developed images. The color rendering will be similar but the contrast
+will differ. This is inherent to the approach; see Known Limitations below.
 
 ### DaVinci Resolve (ACES)
 
@@ -199,6 +212,14 @@ AP0 display variant:
 
 ## Known Limitations
 
+- **Double tone mapping** (ProPhoto variant only): The Fujifilm LUTs are designed for
+  flat F-Log2C footage and include their own tone curve. When used as a look LUT in
+  Photoshop, the input image has already been tone-mapped by Camera Raw (baseline
+  curve, highlights/shadows, etc.), so the Fujifilm tone curve is applied on top of
+  ACR's. The result will have different contrast than Camera Raw's camera-matching
+  DCP profiles (e.g., "Camera PROVIA/Standard"), which integrate the film simulation
+  look into ACR's own rendering. The ACES display variants do not have this issue
+  since they are used as the sole display transform.
 - **Gamma 2.2 assumption** (ProPhoto variant only): The original LUT output gamma is
   assumed to be pure power 2.2. The ACES display variants are unaffected since they
   pass through the original LUT output unchanged.
