@@ -4,13 +4,15 @@
 # dependencies = ["numpy"]
 # ///
 """
-Generate Fujifilm Film Simulation LUTs for ACES and ProPhoto RGB color spaces.
+Generate Fujifilm Film Simulation LUTs for ACES, ProPhoto RGB, and Apple Log.
 
 Reads the original F-Log2C / F-Gamut C .cube LUTs and produces new LUTs with
 different input color spaces:
   - Variant 1: ProPhoto RGB (gamma 1.8) -> ProPhoto RGB (gamma 1.8) (photo look LUT)
   - Variant 2: ACEScct (AP1, log) -> BT.709 / Gamma 2.2 (display LUT for Resolve)
   - Variant 3: Linear ACES2065-1 (AP0) -> BT.709 / Gamma 2.2 (display LUT)
+  - Variant 4: Apple Log (BT.2020) -> BT.709 / Gamma 2.2 (display LUT for iPhone 15/16 Pro)
+  - Variant 5: Apple Log 2 (Apple Gamut) -> BT.709 / Gamma 2.2 (display LUT for iPhone 17 Pro)
 """
 
 import os
@@ -27,6 +29,8 @@ PRIMARIES = {
     "ProPhoto":  (0.7347, 0.2653, 0.1596, 0.8404, 0.0366,  0.0001),
     "AP1":       (0.7130, 0.2930, 0.1650, 0.8300, 0.1280,  0.0440),
     "AP0":       (0.7347, 0.2653, 0.0000, 1.0000, 0.0001, -0.0770),
+    "BT.2020":   (0.7080, 0.2920, 0.1700, 0.7970, 0.1310,  0.0460),
+    "AppleGamut": (0.7250, 0.3010, 0.2210, 0.8140, 0.0680, -0.0760),
 }
 
 # CIE xy white points
@@ -43,6 +47,8 @@ SPACE_WHITE = {
     "ProPhoto":  "D50",
     "AP1":       "D60",
     "AP0":       "D60",
+    "BT.2020":   "D65",
+    "AppleGamut": "D65",
 }
 
 # Bradford chromatic adaptation matrix
@@ -61,6 +67,15 @@ FLOG2C_D = 0.384316
 FLOG2C_E = 8.799461
 FLOG2C_F = 0.092864
 FLOG2C_CUT1 = 0.000889  # linear threshold
+
+# Apple Log constants (from Apple Log Profile White Paper, Apple Inc. 2023)
+APPLE_LOG_R0 = -0.05641088
+APPLE_LOG_RT = 0.01
+APPLE_LOG_C  = 47.28711236
+APPLE_LOG_B  = 0.00964052
+APPLE_LOG_G  = 0.08550479
+APPLE_LOG_D  = 0.69336945
+APPLE_LOG_PT = APPLE_LOG_C * (APPLE_LOG_RT - APPLE_LOG_R0) ** 2
 
 # ACEScct constants (from ACES S-2016-001)
 ACESCCT_CUT_LINEAR = 0.0078125       # 2^(-7), linear threshold
@@ -204,6 +219,32 @@ def linear_to_acescct(x):
     mask = x > ACESCCT_CUT_LINEAR
     out[mask] = (np.log2(x[mask]) + 9.72) / 17.52
     out[~mask] = ACESCCT_SLOPE * x[~mask] + ACESCCT_OFFSET
+    return out
+
+
+def apple_log_to_linear(x):
+    """Convert Apple Log to scene-linear (vectorized)."""
+    x = np.asarray(x, dtype=np.float64)
+    out = np.empty_like(x)
+    mask_lo = x < 0.0
+    mask_hi = x >= APPLE_LOG_PT
+    mask_mid = ~mask_lo & ~mask_hi
+    out[mask_lo] = APPLE_LOG_R0
+    out[mask_mid] = np.sqrt(x[mask_mid] / APPLE_LOG_C) + APPLE_LOG_R0
+    out[mask_hi] = np.power(2.0, (x[mask_hi] - APPLE_LOG_D) / APPLE_LOG_G) - APPLE_LOG_B
+    return out
+
+
+def linear_to_apple_log(x):
+    """Convert scene-linear to Apple Log (vectorized). For verification."""
+    x = np.asarray(x, dtype=np.float64)
+    out = np.empty_like(x)
+    mask_lo = x < APPLE_LOG_R0
+    mask_hi = x >= APPLE_LOG_RT
+    mask_mid = ~mask_lo & ~mask_hi
+    out[mask_lo] = 0.0
+    out[mask_mid] = APPLE_LOG_C * (x[mask_mid] - APPLE_LOG_R0) ** 2
+    out[mask_hi] = APPLE_LOG_G * np.log2(x[mask_hi] + APPLE_LOG_B) + APPLE_LOG_D
     return out
 
 
@@ -455,6 +496,20 @@ def verify_matrices():
     print(f"   Max diff from (1,1,1): {white_diff_pp:.6f}")
     print(f"   {'PASS' if white_diff_pp < 0.05 else 'WARN'}")
 
+    M_bt2020 = conversion_matrix("BT.2020", "F-Gamut C")
+    white_bt2020 = M_bt2020 @ np.array([1.0, 1.0, 1.0])
+    white_diff_bt2020 = np.max(np.abs(white_bt2020 - 1.0))
+    print(f"\n5. BT.2020 white (1,1,1) -> F-GamutC: {white_bt2020}")
+    print(f"   Max diff from (1,1,1): {white_diff_bt2020:.6f}")
+    print(f"   {'PASS' if white_diff_bt2020 < 0.05 else 'WARN'}")
+
+    M_applegamut = conversion_matrix("AppleGamut", "F-Gamut C")
+    white_applegamut = M_applegamut @ np.array([1.0, 1.0, 1.0])
+    white_diff_ag = np.max(np.abs(white_applegamut - 1.0))
+    print(f"\n6. AppleGamut white (1,1,1) -> F-GamutC: {white_applegamut}")
+    print(f"   Max diff from (1,1,1): {white_diff_ag:.6f}")
+    print(f"   {'PASS' if white_diff_ag < 0.05 else 'WARN'}")
+
     print()
 
 
@@ -526,6 +581,42 @@ def verify_acescct():
     print()
 
 
+def verify_apple_log():
+    """Verify Apple Log transfer function round-trip and cut point continuity."""
+    print("=" * 60)
+    print("APPLE LOG TRANSFER FUNCTION VERIFICATION")
+    print("=" * 60)
+
+    # Cut point continuity: quadratic and log segments should meet at Rt
+    quad_at_rt = APPLE_LOG_C * (APPLE_LOG_RT - APPLE_LOG_R0) ** 2
+    log_at_rt = APPLE_LOG_G * np.log2(APPLE_LOG_RT + APPLE_LOG_B) + APPLE_LOG_D
+    print(f"  Cut point (Rt={APPLE_LOG_RT}):")
+    print(f"    Quadratic: {quad_at_rt:.12f}")
+    print(f"    Log:       {log_at_rt:.12f}")
+    print(f"    Diff:      {abs(quad_at_rt - log_at_rt):.2e}")
+    print(f"    Pt const:  {APPLE_LOG_PT:.12f}")
+
+    # Round-trip test
+    test_vals = np.array([0.0, 0.001, 0.005, 0.01, 0.05, 0.18, 0.5, 0.90])
+    encoded = linear_to_apple_log(test_vals)
+    decoded = apple_log_to_linear(encoded)
+    max_roundtrip_err = np.max(np.abs(decoded - test_vals))
+    print(f"  Round-trip max error: {max_roundtrip_err:.2e}")
+    print(f"  {'PASS' if max_roundtrip_err < 1e-10 else 'FAIL'}")
+
+    # 18% gray position in Apple Log
+    apple_log_18 = linear_to_apple_log(np.array([0.18]))[0]
+    print(f"  18% gray -> Apple Log: {apple_log_18:.6f} (grid index ~{apple_log_18 * 64:.1f} of 64)")
+
+    # Dynamic range: what linear value does Apple Log=1.0 correspond to?
+    linear_at_1 = apple_log_to_linear(np.array([1.0]))[0]
+    stops_above_18 = np.log2(linear_at_1 / 0.18)
+    print(f"  Apple Log=1.0 -> linear={linear_at_1:.1f} "
+          f"(~{stops_above_18:.1f} stops above 18% gray)")
+
+    print()
+
+
 def verify_neutral_axis(source_lut_data, source_lut_size, new_lut_data, new_lut_size,
                         variant):
     """
@@ -550,6 +641,8 @@ def verify_neutral_axis(source_lut_data, source_lut_size, new_lut_data, new_lut_
             # For ACEScct: use linear_to_acescct
             if name == "ACEScct_display":
                 input_val = linear_to_acescct(np.array([linear_gray]))[0]
+            elif name in ("AppleLog_display", "AppleLog2_display"):
+                input_val = linear_to_apple_log(np.array([linear_gray]))[0]
             else:
                 # ProPhoto gamma 1.8
                 input_val = linear_gray ** (1.0 / 1.8)
@@ -601,6 +694,8 @@ def main():
     M_bt709_to_prophoto = conversion_matrix("BT.709", "ProPhoto")
     M_ap0_to_fgamutc = FUJIFILM_AP0_TO_FGAMUTC
     M_ap1_to_fgamutc = ACES_AP1_TO_FGAMUTC
+    M_bt2020_to_fgamutc = conversion_matrix("BT.2020", "F-Gamut C")
+    M_applegamut_to_fgamutc = conversion_matrix("AppleGamut", "F-Gamut C")
 
     print("  ProPhoto -> F-Gamut C (computed via Bradford D50->D65):")
     print(f"    {M_prophoto_to_fgamutc}")
@@ -610,11 +705,16 @@ def main():
     print(f"    {M_ap0_to_fgamutc}")
     print("  BT.709 -> ProPhoto (computed via Bradford D65->D50):")
     print(f"    {M_bt709_to_prophoto}")
+    print("  BT.2020 -> F-Gamut C (computed, both D65):")
+    print(f"    {M_bt2020_to_fgamutc}")
+    print("  AppleGamut -> F-Gamut C (computed, both D65):")
+    print(f"    {M_applegamut_to_fgamutc}")
 
     # Run verification
     verify_matrices()
     verify_flog2c()
     verify_acescct()
+    verify_apple_log()
 
     # Define variants
     variants = [
@@ -659,10 +759,39 @@ def main():
                 "Use: Display/output transform in ACES pipeline (replaces ODT)",
             ],
         },
+        {
+            "name": "AppleLog_display",
+            "dir": "AppleLog_display",
+            "prefix": "AppleLog_to_",
+            "matrix_in": M_bt2020_to_fgamutc,
+            "input_decode": apple_log_to_linear,
+            "matrix_out": None,
+            "comments": [
+                "Input: Apple Log (BT.2020 primaries, D65)",
+                "Output: BT.709 / Gamma 2.2 (display-referred)",
+                "Use: Display LUT for iPhone 15/16 Pro Apple Log footage",
+            ],
+        },
+        {
+            "name": "AppleLog2_display",
+            "dir": "AppleLog2_display",
+            "prefix": "AppleLog2_to_",
+            "matrix_in": M_applegamut_to_fgamutc,
+            "input_decode": apple_log_to_linear,
+            "matrix_out": None,
+            "comments": [
+                "Input: Apple Log 2 (Apple Gamut primaries, D65)",
+                "Output: BT.709 / Gamma 2.2 (display-referred)",
+                "Use: Display LUT for iPhone 17 Pro Apple Log 2 footage",
+            ],
+        },
     ]
 
-    # Process each film simulation x variant
-    total = len(FILM_SIMS) * len(variants)
+    # Grid sizes to generate
+    grid_sizes = [65, 33]
+
+    # Process each film simulation x variant x grid size
+    total = len(FILM_SIMS) * len(variants) * len(grid_sizes)
     count = 0
 
     for src_filename, sim_name in FILM_SIMS:
@@ -672,22 +801,25 @@ def main():
         print(f"  Size: {src_size}, entries: {len(src_data)}")
 
         for variant in variants:
-            count += 1
-            out_name = f"{variant['prefix']}{sim_name}_65grid.cube"
-            out_path = os.path.join(OUTPUT_DIR, variant["dir"], out_name)
+            for grid_size in grid_sizes:
+                count += 1
+                out_name = f"{variant['prefix']}{sim_name}_{grid_size}grid.cube"
+                out_path = os.path.join(OUTPUT_DIR, variant["dir"], out_name)
 
-            title = f"{variant['prefix']}{sim_name}"
-            comments = variant["comments"] + [
-                f"Source: {src_filename}",
-                "Generated from Fujifilm GFX ETERNA 55 F-Log2C LUT",
-            ]
+                title = f"{variant['prefix']}{sim_name}"
+                comments = variant["comments"] + [
+                    f"Source: {src_filename}",
+                    "Generated from Fujifilm GFX ETERNA 55 F-Log2C LUT",
+                ]
 
-            print(f"  [{count}/{total}] Generating {out_name}...")
+                print(f"  [{count}/{total}] Generating {out_name}...")
 
-            new_data = process_variant(src_data, src_size, variant)
-            write_cube(out_path, 65, new_data, title=title, comments=comments)
+                new_data = process_variant(src_data, src_size, variant,
+                                           grid_size=grid_size)
+                write_cube(out_path, grid_size, new_data, title=title,
+                           comments=comments)
 
-        # Run neutral axis verification on ETERNA
+        # Run neutral axis verification on ETERNA (65-grid only)
         if sim_name == "ETERNA":
             print("\n  --- Verification (ETERNA) ---")
             for variant in variants:
