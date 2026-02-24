@@ -1,7 +1,8 @@
-# Fujifilm Film Simulation LUTs for ACES, ProPhoto RGB & Apple Log
+# Fujifilm Film Simulation LUTs & Creative Profiles
 
-3D LUTs that apply Fujifilm's official film simulation looks to images in
-**ACES** (ACEScct / ACES2065-1), **ProPhoto RGB**, and **Apple Log** color spaces.
+3D LUTs and **ACR/Lightroom Creative Profiles** that apply Fujifilm's official
+film simulation looks to images in **ACES** (ACEScct / ACES2065-1),
+**ProPhoto RGB**, **Apple Log**, and **Adobe Camera Raw / Lightroom**.
 
 Generated from the official Fujifilm F-Log2C / F-Gamut C LUTs
 (GFX ETERNA 55, V1.00) using the color science from Fujifilm's published
@@ -26,6 +27,10 @@ IDT and F-Log2C data sheet.
 
 ```
 output/
+  ACR_profiles/             # ACR / Lightroom Creative Profiles (.xmp)
+    Fujifilm PROVIA.xmp
+    ...
+
   ProPhoto/                 # ProPhoto RGB (gamma 1.8) -> ProPhoto RGB (gamma 1.8)
     ProPhoto_to_PROVIA_65grid.cube
     ProPhoto_to_PROVIA_33grid.cube
@@ -57,6 +62,12 @@ Each film simulation is available in both **65-grid** (higher precision) and **3
 
 ### What each variant does
 
+**ACR Creative Profiles** are `.xmp` files that appear in Lightroom / Camera Raw's
+profile browser under the "Fujifilm" group. They embed a 32x32x32 3D LUT and include
+the inverse of ACR's default tone curve to avoid double tone mapping, so the Fujifilm
+film simulation's own tone curve is the only one applied. The profiles support the
+Amount slider (0-200%) and work with all camera models.
+
 **ProPhoto** LUTs are *look LUTs* -- input and output are both ProPhoto RGB with
 standard gamma 1.8 encoding (the built-in Photoshop `ProPhoto RGB` profile).
 The film simulation look is baked in, with all output colors within BT.709 gamut.
@@ -84,6 +95,26 @@ Both ACES variants **replace** (not supplement) the ACES Output Transform.
 ---
 
 ## Recommended Workflows
+
+### Adobe Camera Raw / Lightroom (Creative Profiles)
+
+1. **Install the profiles**: Copy the `.xmp` files to the Creative Profiles directory:
+   - **macOS**: `~/Library/Application Support/Adobe/CameraRaw/Settings/`
+   - **Windows**: `%APPDATA%\Adobe\CameraRaw\Settings\`
+2. **Restart** Lightroom or Photoshop
+3. **Select a profile**: In the Develop module (Lightroom) or Camera Raw, open the
+   Profile Browser. The Fujifilm profiles appear under the "Fujifilm" group
+4. **Adjust Amount**: Use the Amount slider (0-200%) to control the strength of
+   the film simulation look
+
+**Important: Use "Adobe Standard" as your base camera profile.** The profiles bake
+the inverse of ACR's default tone curve (the ACR3 S-curve) into the LUT. This
+inverse is only correct when the base camera profile uses the default ACR3 curve.
+"Adobe Standard" uses this default curve; other profiles ("Adobe Color", "Adobe
+Landscape", camera-matching profiles like "Camera PROVIA/Standard") embed their
+own `ProfileToneCurve` that replaces the default, so the inverse cancellation
+would be imprecise. The Creative Profile format does not support forcing a
+specific base profile, so this must be set manually.
 
 ### Photoshop (ProPhoto RGB)
 
@@ -197,18 +228,28 @@ Final Cut Pro, etc.). Ensure the input matches the expected color space and enco
 ### Generate
 
 ```sh
+# Generate .cube LUTs (all variants)
 uv run generate_luts.py
+
+# Generate ACR/Lightroom Creative Profiles (.xmp)
+uv run generate_profiles.py
 ```
 
-This reads the 10 source film simulation LUTs, computes color space conversion
-matrices, and writes 100 output LUTs (50 at 65-grid, 50 at 33-grid) to `output/`. Takes a few seconds.
+`generate_luts.py` reads the 10 source film simulation LUTs, computes color space
+conversion matrices, and writes 100 output LUTs (50 at 65-grid, 50 at 33-grid)
+to `output/`.
 
-The script runs built-in verification:
+`generate_profiles.py` generates 10 Creative Profile `.xmp` files to
+`output/ACR_profiles/`. Each profile embeds a 32x32x32 ProPhoto RGB (gamma 1.8)
+3D LUT with the inverse ACR3 tone curve baked in.
+
+Both scripts run built-in verification:
 - Matrix round-trip and white point preservation
 - F-Log2C encoding against Fujifilm's documented reference points
-- ACEScct transfer function round-trip and cut point continuity
-- Apple Log transfer function round-trip and cut point continuity
+- ACEScct / Apple Log transfer function round-trip and cut point continuity
 - Neutral axis comparison between original and generated LUTs
+- (Profiles) ACR3 inverse curve validation, base-85 round-trip, XMP/binary
+  structure integrity, LUT data reconstruction accuracy
 
 ---
 
@@ -216,9 +257,22 @@ The script runs built-in verification:
 
 ### Conversion Pipeline
 
-Each output LUT bakes the following chain into a single 3D LUT (65-grid or 33-grid):
+Each output LUT/profile bakes the following chain into a single 3D LUT:
 
 ```
+ACR Creative Profile variant (32-grid .xmp):
+  ProPhoto RGB (gamma 1.8) -- as received from ACR's pipeline
+    -> [decode gamma 1.8 to linear]
+    -> [inverse ACR3 S-curve -- undo ACR's tone mapping]
+    -> [matrix: ProPhoto to F-Gamut C, with Bradford D50->D65]
+    -> [F-Log2C encoding]
+    -> [original Fujifilm 3D LUT lookup]
+    -> BT.709 / Gamma 2.2
+    -> [decode gamma 2.2 to linear]
+    -> [matrix: BT.709 to ProPhoto, with Bradford D65->D50]
+    -> [encode gamma 1.8]
+    -> ProPhoto RGB (gamma 1.8)
+
 ProPhoto variant:
   ProPhoto RGB (gamma 1.8)
     -> [decode gamma 1.8 to linear]
@@ -287,14 +341,13 @@ Apple Log 2 display variant:
 
 ## Known Limitations
 
-- **Double tone mapping** (ProPhoto variant only): The Fujifilm LUTs are designed for
-  flat F-Log2C footage and include their own tone curve. When used as a look LUT in
-  Photoshop, the input image has already been tone-mapped by Camera Raw (baseline
-  curve, highlights/shadows, etc.), so the Fujifilm tone curve is applied on top of
-  ACR's. The result will have different contrast than Camera Raw's camera-matching
-  DCP profiles (e.g., "Camera PROVIA/Standard"), which integrate the film simulation
-  look into ACR's own rendering. The ACES display variants do not have this issue
-  since they are used as the sole display transform.
+- **Double tone mapping** (ProPhoto `.cube` LUT variant only): The Fujifilm LUTs are
+  designed for flat F-Log2C footage and include their own tone curve. When used as a
+  look LUT in Photoshop, the input image has already been tone-mapped by Camera Raw
+  (baseline curve, highlights/shadows, etc.), so the Fujifilm tone curve is applied on
+  top of ACR's. The **ACR Creative Profiles** solve this by baking the inverse of ACR's
+  default tone curve (extracted from the DNG SDK) into the LUT input. The ACES display
+  variants do not have this issue since they are used as the sole display transform.
 - **Gamma 2.2 assumption** (ProPhoto variant only): The original LUT output gamma is
   assumed to be pure power 2.2. The ACES display variants are unaffected since they
   pass through the original LUT output unchanged.

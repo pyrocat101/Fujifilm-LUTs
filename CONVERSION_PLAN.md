@@ -176,6 +176,128 @@ output/
 
 ---
 
+## Variant 4 -- ACR / Lightroom Creative Profiles (.xmp)
+
+| Property | Value |
+|---|---|
+| **Use case** | Adobe Camera Raw / Lightroom: native profile browser with Amount slider |
+| **Input** | ProPhoto RGB (gamma 1.8) — as received by ACR's RGBTable pipeline stage |
+| **Output** | ProPhoto RGB (gamma 1.8) — film sim look baked in |
+| **Grid size** | 32x32x32 (maximum supported by ACR Creative Profiles) |
+| **Pipeline** | ProPhoto(γ1.8) -> ProPhoto(lin) -> **ACR3 inverse** -> F-GamutC(lin) -> F-Log2C -> **[LUT]** -> BT.709(γ2.2) -> BT.709(lin) -> ProPhoto(lin) -> ProPhoto(γ1.8) |
+
+### Script: `generate_profiles.py`
+
+```
+Dependencies: Python 3 (>=3.10), NumPy
+Run: uv run generate_profiles.py
+```
+
+### Output
+
+```
+output/
+  ACR_profiles/
+    Fujifilm ETERNA.xmp
+    Fujifilm PROVIA.xmp
+    Fujifilm Velvia.xmp
+    Fujifilm ASTIA.xmp
+    Fujifilm CLASSIC-CHROME.xmp
+    Fujifilm REALA-ACE.xmp
+    Fujifilm PRO-Neg.Std.xmp
+    Fujifilm CLASSIC-Neg..xmp
+    Fujifilm ETERNA-BB.xmp
+    Fujifilm ACROS.xmp
+```
+
+### ACR Rendering Pipeline and Inverse Tone Curve
+
+In ACR's rendering pipeline (confirmed via DNG SDK 1.7.1 `dng_render.cpp`), the
+processing order is:
+
+```
+Camera Raw → Matrix+WB → HueSatMap → Exposure → LookTable
+  → TONE CURVE (ACR3 S-curve) → RGBTables (Creative Profile 3D LUT) → Output
+```
+
+The Creative Profile's 3D LUT (RGBTable) receives data that has already been
+tone-curved by ACR's default S-curve (the `dng_tone_curve_acr3_default` from
+`dng_render.cpp`). Since the Fujifilm film simulation LUTs are designed for flat
+log footage and include their own tone curve, applying them on top of ACR's S-curve
+would produce double tone mapping.
+
+**Solution**: Bake the inverse of ACR's default tone curve into the LUT input.
+The 1025-entry inverse curve is extracted from the DNG SDK
+(`dng_render.cpp` lines 444-703, `dng_tone_curve_acr3_default::EvaluateInverse`).
+The input decode pipeline becomes:
+
+```
+gamma 1.8 decode → inverse ACR3 S-curve → scene-linear ProPhoto RGB
+```
+
+This effectively cancels ACR's tone mapping, so only the Fujifilm film simulation's
+own tone curve is applied.
+
+**Base profile dependency**: The inverse is specifically the inverse of the ACR3
+default tone curve (`dng_tone_curve_acr3_default`). In the DNG SDK's `Render()`
+method (lines 2145-2162), if the selected camera profile (DCP) has a valid
+`ProfileToneCurve`, it **replaces** the ACR3 default. This means the inverse
+cancellation is only exact when the user selects "Adobe Standard" as the base
+profile (which uses the ACR3 default). Other profiles ("Adobe Color", camera-
+matching DCPs like "Camera PROVIA") embed their own tone curves. The Creative
+Profile XMP format has no attribute to force a specific base profile
+(`crs:PresetType="Look"` is purely an overlay).
+
+### XMP / Binary Format (Reverse-Engineered)
+
+The Creative Profile format was reverse-engineered from the DNG SDK source code
+(`dng_big_table.cpp`) and the open-source XMPconverter project:
+
+**Binary blob structure** (little-endian):
+
+| Offset | Type | Content |
+|---|---|---|
+| 0 | 4 × uint32 | Header: `[1, 1, 3, grid_size]` |
+| 16 | N³×3 × uint16 | Delta-encoded LUT data (B-fastest, G-middle, R-slowest) |
+| 16 + N³×6 | 3 × uint32 | Footer: `[colors, gamma, gamut]` |
+| +12 | 2 × float64 | Amount slider range: `[min_range, max_range]` |
+
+**Delta encoding**: Each uint16 LUT sample stores
+`(absolute_value - identity_value) & 0xFFFF`, where
+`identity = (index × 0xFFFF + (size >> 1)) // (size - 1)` (integer division).
+
+**Compression**: zlib level 6, prepended with 4-byte LE uncompressed size.
+
+**Base-85 encoding**: Custom 85-character XML-safe table (not standard Z85 or Ascii85).
+Little-endian uint32 grouping, LSB-first digit ordering.
+
+**XMP attributes**: The compressed+encoded blob is stored as `crs:Table_{MD5}`.
+`crs:RGBTable` references the same MD5 hash (uppercase hex of the raw blob).
+
+**Footer codes**: colors: 0=sRGB, 1=AdobeRGB, 2=ProPhoto, 3=P3, 4=Rec2020;
+gamma: 1=sRGB, 2=ProPhoto(1.8), 3=AdobeRGB(2.2), 4=Rec2020;
+gamut: 0=clip, 1=extend.
+
+### Verification Results (Creative Profiles)
+
+1. **ACR3 inverse curve**: 1025 entries, monotonically increasing, endpoints [0, 1].
+   Values match DNG SDK source exactly (verified entry-by-entry). 18% gray
+   round-trips correctly: `acr3_inverse(0.39) ≈ 0.18` (within 0.002). PASS.
+
+2. **Base-85 round-trip**: Tested for lengths [1, 2, 3, 4, 5, 16, 100, 1000]
+   bytes. Exact bit-for-bit reconstruction. PASS.
+
+3. **XMP structure** (PROVIA profile): Valid XML, MD5 integrity verified,
+   header `[1, 1, 3, 32]`, footer `[ProPhoto, γ1.8, clip, 0-200%]`. PASS.
+
+4. **LUT data reconstruction** (PROVIA profile): Black corner near zero
+   (all channels < 1000/65535), white corner well above zero
+   (all channels > 30000/65535). Mid-gray neutrality spread reported. PASS.
+
+5. **All 10 profiles**: Exist and parse as valid XML. PASS.
+
+---
+
 ## Known Limitations
 
 1. **Gamma 2.2 assumption (ProPhoto variant only)**: The original LUT output gamma
