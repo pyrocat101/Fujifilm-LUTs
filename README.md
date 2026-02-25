@@ -65,8 +65,11 @@ Each film simulation is available in both **65-grid** (higher precision) and **3
 **ACR Creative Profiles** are `.xmp` files that appear in Lightroom / Camera Raw's
 profile browser under the "Fujifilm" group. They embed a 32x32x32 3D LUT and include
 the inverse of ACR's default tone curve to avoid double tone mapping, so the Fujifilm
-film simulation's own tone curve is the only one applied. The profiles support the
-Amount slider (0-200%) and work with all camera models.
+film simulation's own tone curve is the only one applied. A +1 stop exposure offset is
+baked in to compensate for the brightness difference between ACR's default S-curve and
+the Fujifilm sims' more conservative tone mapping (configurable via
+`EXPOSURE_OFFSET_STOPS` in `generate_profiles.py`). The profiles support the Amount
+slider (0-200%) and work with all camera models.
 
 **ProPhoto** LUTs are *look LUTs* -- input and output are both ProPhoto RGB with
 standard gamma 1.8 encoding (the built-in Photoshop `ProPhoto RGB` profile).
@@ -115,6 +118,12 @@ Landscape", camera-matching profiles like "Camera PROVIA/Standard") embed their
 own `ProfileToneCurve` that replaces the default, so the inverse cancellation
 would be imprecise. The Creative Profile format does not support forcing a
 specific base profile, so this must be set manually.
+
+**Exposure tuning:** If the profiles look too bright or too dark for your taste,
+you can regenerate them with a different exposure offset by changing
+`EXPOSURE_OFFSET_STOPS` in `generate_profiles.py` (default: `1.0` stop).
+Set to `0.0` for the "pure" Fujifilm rendering (will look ~1 stop darker
+than ACR's default).
 
 ### Photoshop (ProPhoto RGB)
 
@@ -264,6 +273,7 @@ ACR Creative Profile variant (32-grid .xmp):
   ProPhoto RGB (gamma 1.8) -- as received from ACR's pipeline
     -> [decode gamma 1.8 to linear]
     -> [inverse ACR3 S-curve -- undo ACR's tone mapping]
+    -> [+1 stop exposure offset -- match ACR's default brightness]
     -> [matrix: ProPhoto to F-Gamut C, with Bradford D50->D65]
     -> [F-Log2C encoding]
     -> [original Fujifilm 3D LUT lookup]

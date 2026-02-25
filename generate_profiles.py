@@ -40,6 +40,14 @@ from generate_luts import (
 
 GRID_SIZE = 32  # Max supported by ACR Creative Profiles
 
+# Exposure offset (in stops) to compensate for the brightness difference between
+# ACR's default rendering (ACR3 S-curve) and Fujifilm's film simulation tone curves.
+# ACR3 boosts 18% gray by ~1.1 stops compared to the Fujifilm sims' own rendering.
+# Without this offset, the Creative Profile looks ~1 stop dark relative to ACR's
+# default look because we undo ACR3 but Fujifilm's curve is more conservative.
+# Set to 0.0 to disable and get the "pure" Fujifilm rendering from scene-linear.
+EXPOSURE_OFFSET_STOPS = 1.0
+
 OUTPUT_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "output", "ACR_profiles"
 )
@@ -432,15 +440,16 @@ def main():
     #   2. Tone-curved by ACR's default S-curve (still linear ProPhoto)
     #   3. Gamma 1.8 encoded (to match our declared LUT input space)
     #
-    # Our input_decode reverses steps 3 and 2:
-    #   gamma 1.8 decode → inverse ACR3 curve → original scene-linear
+    # Our input_decode reverses steps 3 and 2, then applies an exposure
+    # offset to match ACR's default brightness level:
+    #   gamma 1.8 decode → inverse ACR3 curve → exposure boost → scene-linear
     # Then the rest of the pipeline (matrix → F-Log2C → Fujifilm LUT)
-    # operates on the original linear data, as if ACR's curve was never
-    # applied. Only the Fujifilm film simulation's tone curve is active.
+    # applies only the Fujifilm film simulation's own tone curve.
+    exposure_gain = 2.0 ** EXPOSURE_OFFSET_STOPS
     variant = {
         "name": "ProPhoto",
         "matrix_in": M_prophoto_to_fgamutc,
-        "input_decode": lambda x: acr3_inverse(gamma_decode(x, 1.8)),
+        "input_decode": lambda x: acr3_inverse(gamma_decode(x, 1.8)) * exposure_gain,
         "matrix_out": M_bt709_to_prophoto,
         "output_gamma": 2.2,
         "output_encode": lambda x: gamma_encode(x, 1.8),
