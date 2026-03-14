@@ -230,9 +230,11 @@ Final Cut Pro, etc.). Ensure the input matches the expected color space and enco
 ### Prerequisites
 
 - [uv](https://docs.astral.sh/uv/) (Python package runner)
-- The original Fujifilm F-Log2C 3D LUTs in
-  `gfx-eterna-55-3d-lut-v100/65Grid/F-Log2C/`
-  (download from the [Fujifilm support page](https://fujifilm-x.com/en-us/support/download/software/lut/))
+- The official Fujifilm F-Log2C 3D LUTs (GFX ETERNA 55, V1.00):
+  1. Download from the [Fujifilm LUT download page](https://fujifilm-x.com/en-us/support/download/software/lut/)
+     (select "GFX ETERNA 55" under 3D LUT)
+  2. Extract the archive so that the 65-grid F-Log2C LUTs are at
+     `gfx-eterna-55-3d-lut-v100/65Grid/F-Log2C/` relative to this repo
 
 ### Generate
 
@@ -340,31 +342,92 @@ Apple Log 2 display variant:
 
 ### Source Data
 
-- Film simulation LUTs: Fujifilm GFX ETERNA 55, V1.00
-- F-Log2C transfer function: `F-Log2C_DataSheet_E_Ver.1.0.pdf`
-- F-Gamut C to ACES matrix: `FUJIFILM_IDT_F-Log2C_Ver.1.00.ctl`
+- Film simulation LUTs: [Fujifilm GFX ETERNA 55, V1.00](https://fujifilm-x.com/en-us/support/download/software/lut/) (F-Log2C / F-Gamut C)
+- F-Log2C transfer function: Fujifilm F-Log2C Data Sheet, Ver.1.0 (included in the LUT download)
+- F-Gamut C to ACES matrix: [`FUJIFILM_IDT_F-Log2C_Ver.1.00.ctl`](https://github.com/AcademySoftwareFoundation/OpenACES/blob/main/aces/input/IDT.Fujifilm.F-Log2C_F-GamutC.ctl) (ACES Input Transforms)
 - ACEScct transfer function: ACES S-2016-001
 - Apple Log / Apple Log 2 transfer function: Apple Log Profile White Paper (Apple Inc., 2023)
-- Apple Gamut primaries: `CSC.Apple.AppleLog2_to_ACES.ctl` (ACES Input and Colorspaces)
+- Apple Gamut primaries: [`CSC.Apple.AppleLog2_to_ACES.ctl`](https://github.com/AcademySoftwareFoundation/OpenACES/blob/main/aces/csc/Apple/CSC.Apple.AppleLog2_to_ACES.ctl) (ACES Input and Colorspaces)
+
+### ACR Rendering Pipeline and Inverse Tone Curve
+
+In ACR's rendering pipeline (confirmed via DNG SDK 1.7.1 `dng_render.cpp`), the
+processing order is:
+
+```
+Camera Raw → Matrix+WB → HueSatMap → Exposure → LookTable
+  → TONE CURVE (ACR3 S-curve) → RGBTables (Creative Profile 3D LUT) → Output
+```
+
+The Creative Profile's 3D LUT (RGBTable) receives data that has already been
+tone-curved by ACR's default S-curve (the `dng_tone_curve_acr3_default` from
+`dng_render.cpp`). Since the Fujifilm film simulation LUTs are designed for flat
+log footage and include their own tone curve, applying them on top of ACR's S-curve
+would produce double tone mapping.
+
+**Solution**: Bake the inverse of ACR's default tone curve into the LUT input.
+The 1025-entry inverse curve is extracted from the DNG SDK
+(`dng_render.cpp` lines 444-703, `dng_tone_curve_acr3_default::EvaluateInverse`).
+
+**Exposure offset compensation:** After undoing ACR3, the recovered scene-linear
+values produce a result that is ~1 stop darker than ACR's default rendering. This
+is because ACR3's S-curve boosts 18% gray by approximately 2.16x (+1.11 stops),
+while Fujifilm's film simulation tone curves are more conservative (designed for
+flat F-Log2C input). To match ACR's default brightness level, a configurable
+exposure offset (default: +1.0 stop) is applied after the ACR3 inverse.
+
+**Base profile dependency:** The inverse is specifically the inverse of the ACR3
+default tone curve. If the selected camera profile (DCP) has a valid
+`ProfileToneCurve` (DNG tag 50940), it **replaces** the ACR3 default in the
+pipeline. This means the inverse cancellation is only exact when the user selects
+"Adobe Standard" as the base profile. Other profiles ("Adobe Color", camera-matching
+DCPs like "Camera PROVIA") embed their own tone curves. The Creative Profile XMP
+format has no attribute to force a specific base profile.
+
+### Creative Profile Binary Format
+
+The Creative Profile format was reverse-engineered from the DNG SDK source code
+(`dng_big_table.cpp`) and the open-source XMPconverter project:
+
+**Binary blob structure** (little-endian):
+
+| Offset | Type | Content |
+|---|---|---|
+| 0 | 4 × uint32 | Header: `[1, 1, 3, grid_size]` |
+| 16 | N³×3 × uint16 | Delta-encoded LUT data (B-fastest, G-middle, R-slowest) |
+| 16 + N³×6 | 3 × uint32 | Footer: `[colors, gamma, gamut]` |
+| +12 | 2 × float64 | Amount slider range: `[min_range, max_range]` |
+
+**Delta encoding**: Each uint16 LUT sample stores
+`(absolute_value - identity_value) & 0xFFFF`, where
+`identity = (index × 0xFFFF + (size >> 1)) // (size - 1)` (integer division).
+
+**Compression**: zlib level 6, prepended with 4-byte LE uncompressed size.
+
+**Base-85 encoding**: Custom 85-character XML-safe table (not standard Z85 or Ascii85).
+Little-endian uint32 grouping, LSB-first digit ordering.
+
+**XMP attributes**: The compressed+encoded blob is stored as `crs:Table_{MD5}`.
+`crs:RGBTable` references the same MD5 hash (uppercase hex of the raw blob).
+
+**Footer codes**: colors: 0=sRGB, 1=AdobeRGB, 2=ProPhoto, 3=P3, 4=Rec2020;
+gamma: 1=sRGB, 2=ProPhoto(1.8), 3=AdobeRGB(2.2), 4=Rec2020;
+gamut: 0=clip, 1=extend.
 
 ---
 
 ## Known Limitations
 
-- **Double tone mapping** (ProPhoto `.cube` LUT variant only): The Fujifilm LUTs are
-  designed for flat F-Log2C footage and include their own tone curve. When used as a
-  look LUT in Photoshop, the input image has already been tone-mapped by Camera Raw
-  (baseline curve, highlights/shadows, etc.), so the Fujifilm tone curve is applied on
-  top of ACR's. The **ACR Creative Profiles** solve this by baking the inverse of ACR's
-  default tone curve (extracted from the DNG SDK) into the LUT input. The ACES display
-  variants do not have this issue since they are used as the sole display transform.
+- **Double tone mapping** (ProPhoto `.cube` LUT variant only): The Fujifilm LUTs
+  include their own tone curve. If the input image was developed with a RAW processor
+  that applies its own tone curve (e.g., Adobe Camera Raw / Lightroom), the Fujifilm
+  tone curve stacks on top, producing double tone mapping. This is not an issue if
+  the RAW developer outputs a linear (flat) tone curve, or if you use the **ACR
+  Creative Profiles** (which bake the inverse of ACR's default tone curve into the
+  LUT input).
 - **Gamma 2.2 assumption** (ProPhoto variant only): The original LUT output gamma is
   assumed to be pure power 2.2. The ACES display variants are unaffected since they
   pass through the original LUT output unchanged.
 - **AP0 input domain [0, 1]**: For the linear AP0 variant, scene-linear values above
   1.0 are clamped. The ACEScct variant does not have this limitation (covers ~10 stops
   above 18% gray). Use ACEScct for content with bright highlights.
-- **Apple Log vs Apple Log 2**: These use different color primaries (BT.2020 vs
-  Apple Gamut). Using the wrong variant will produce incorrect colors. Check which
-  format your device records: iPhone 15/16 Pro use Apple Log, iPhone 17 Pro uses
-  Apple Log 2.
