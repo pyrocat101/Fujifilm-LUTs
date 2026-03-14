@@ -431,3 +431,17 @@ gamut: 0=clip, 1=extend.
 - **AP0 input domain [0, 1]**: For the linear AP0 variant, scene-linear values above
   1.0 are clamped. The ACEScct variant does not have this limitation (covers ~10 stops
   above 18% gray). Use ACEScct for content with bright highlights.
+
+---
+
+## Disclaimer
+
+This project is not affiliated with, endorsed by, or sponsored by FUJIFILM Corporation.
+Film simulation names (PROVIA, Velvia, ASTIA, CLASSIC CHROME, ETERNA, ACROS, REALA ACE,
+etc.) are trademarks of FUJIFILM Corporation. These names are used here solely to
+identify the film simulation looks that the LUTs are derived from.
+
+The output LUTs are derived from Fujifilm's officially distributed F-Log2C 3D LUTs
+through color space transformations. The source LUTs are not included in this
+repository; see [Reproducing the LUTs](#reproducing-the-luts) for download
+instructions.
